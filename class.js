@@ -62,6 +62,11 @@
   @media (prefers-reduced-motion:reduce){.dot{animation:none;opacity:.7}}
 
   .card{border:1px solid #272d3a;border-radius:10px;padding:16px;margin-top:12px;background:#191d27}
+  .chead{display:flex;align-items:baseline;gap:12px}
+  .per{
+    font:700 15px/1 ui-monospace,"SF Mono","Roboto Mono",Menlo,monospace;
+    color:#e2a13f;flex:none;min-width:3ch
+  }
   .cname{font-size:16px;font-weight:600;line-height:1.3}
   .meta{margin-top:10px;display:grid;grid-template-columns:auto 1fr;gap:5px 14px;
     font:400 13px/1.4 ui-monospace,"SF Mono","Roboto Mono",Menlo,monospace}
@@ -71,6 +76,13 @@
 
   .foot{margin-top:32px;color:#5f6879;
     font:400 12px/1.6 ui-monospace,"SF Mono","Roboto Mono",Menlo,monospace}
+  .k{color:#5f6879;width:11ch;flex:none}
+  .v{color:#e8eaf0;flex:1;word-break:break-word}
+  .v.bad{color:#e06b5a}
+  .v.teach{color:#57c9a5}
+  .raw{margin-top:14px;padding:12px;background:#0e1118;border:1px solid #272d3a;
+    border-radius:8px;color:#767e91;overflow-x:auto;white-space:pre;
+    font:400 11px/1.5 ui-monospace,"SF Mono","Roboto Mono",Menlo,monospace}
   section{margin-top:36px}
   `;
 
@@ -105,6 +117,39 @@
   }
 
   function fmtDate(d) { return MONTHS[d.getMonth()] + ' ' + d.getDate(); }
+
+  // ESUHSD names sections "TITLE - CODE - SURNAME - Period 0X".
+  // The period chunk is the anchor; the teacher is whatever sits before it.
+  function parseSection(raw) {
+    var out = { title: raw || '', teacher: null, period: null };
+    if (!raw) { return out; }
+    var parts = raw.split(/\s+-\s+/);
+    var isName = function (s) { return /^[A-Za-z][A-Za-z'\u2019\-. ]*$/.test(s.trim()); };
+    var pIdx = -1, m, i;
+
+    for (i = 0; i < parts.length; i++) {
+      m = parts[i].match(/^per(?:iod)?\.?\s*0*(\d{1,2})$/i);
+      if (m) { pIdx = i; out.period = parseInt(m[1], 10); break; }
+    }
+    // Some sections just end in a bare section number, e.g. "... - NGUYEN - 02".
+    if (pIdx === -1 && parts.length > 1 && /^0*\d{1,2}$/.test(parts[parts.length - 1])) {
+      pIdx = parts.length - 1;
+      out.period = parseInt(parts[pIdx], 10);
+    }
+
+    if (pIdx > 0 && isName(parts[pIdx - 1])) {
+      out.teacher = parts[pIdx - 1].trim();
+      out.title = parts.slice(0, pIdx - 1).join(' - ');
+    } else if (pIdx > 0) {
+      out.title = parts.slice(0, pIdx).join(' - ');
+    } else if (parts.length > 1 && isName(parts[parts.length - 1])) {
+      out.teacher = parts[parts.length - 1].trim();
+      out.title = parts.slice(0, -1).join(' - ');
+    }
+    if (!out.title) { out.title = raw; }
+    return out;
+  }
+
   function fmtTime(d) {
     var h = d.getHours(), m = d.getMinutes();
     var ap = h >= 12 ? 'PM' : 'AM';
@@ -225,49 +270,87 @@
     html += '</section>';
 
     body.innerHTML = html + '<section id="stw-list"></section>' +
+      '<section id="stw-probe"></section>' +
       '<p class="foot">Last checked ' + fmtTime(now) + ' \u00b7 rechecks every 10 min \u00b7 ' +
       enr.length + ' total enrollment rows on this account</p>';
 
+    // Probe: run the newest enrollment on the account through the exact same
+    // code path the real classes use, so the parser is verifiable while the
+    // new year is still empty.
+    var probe = root.getElementById('stw-probe');
+    var newest = enr.slice().sort(function (a, b) { return b.id - a.id; })[0];
+    if (newest) {
+      probe.innerHTML = '<div class="lbl">Parser probe</div>';
+      var pSec = null, pErr = null;
+      try {
+        pSec = await getJSON('/api/v1/sections/' + newest.course_section_id);
+      } catch (x) { pErr = x.message; }
+      var pp = parseSection(pSec && pSec.name);
+      var kv = function (k, v, cls) {
+        return '<div class="row"><span class="k">' + k + '</span><span class="v ' +
+          (cls || '') + '">' + esc(v == null ? '\u2014' : v) + '</span></div>';
+      };
+      probe.innerHTML += kv('enrollment', newest.id) +
+        kv('created', new Date(newest.created_at).toLocaleString()) +
+        kv('course', newest.course_id) +
+        kv('section', newest.course_section_id) +
+        kv('raw name', pErr ? ('fetch failed: ' + pErr) : (pSec && pSec.name), pErr ? 'bad' : '') +
+        kv('\u2192 title', pp.title === (pSec && pSec.name) ? null : pp.title) +
+        kv('\u2192 teacher', pp.teacher, 'teach') +
+        kv('\u2192 period', pp.period) +
+        '<pre class="raw">' + esc(JSON.stringify(pSec, null, 2)) + '</pre>';
+    }
+
     if (current.length === 0) { return; }
 
-    // Only now go fetch course and section detail for the new rows.
+    // Section names carry teacher and period and are readable even when the
+    // course itself is still unpublished, so lead with those.
     var list = root.getElementById('stw-list');
-    list.innerHTML = '<div class="lbl">Your classes</div>';
+    list.innerHTML = '<div class="lbl">Loading detail\u2026</div>';
 
+    var rows = [];
     for (var i = 0; i < current.length; i++) {
       var e = current[i];
-      var course = null, section = null;
-      try {
-        course = await getJSON('/api/v1/courses/' + e.course_id + '?include[]=teachers');
-      } catch (x) { /* unpublished courses reject students, expected */ }
+      var section = null, course = null;
       try {
         section = await getJSON('/api/v1/sections/' + e.course_section_id);
-      } catch (x) { /* same */ }
+      } catch (x) { /* rare, section reads are usually allowed */ }
+      try {
+        course = await getJSON('/api/v1/courses/' + e.course_id);
+      } catch (x) { /* unpublished courses reject students, expected */ }
 
-      var name = (course && course.name) || (section && section.name) ||
-        ('Course ' + e.course_id);
-      var teachers = course && course.teachers && course.teachers.length
-        ? course.teachers.map(function (t) { return t.display_name; }).join(', ')
-        : null;
-      var secName = section && section.name ? section.name : null;
+      var p = parseSection(section && section.name);
+      rows.push({
+        enr: e,
+        raw: (section && section.name) || null,
+        title: p.title || (course && course.name) || ('Course ' + e.course_id),
+        teacher: p.teacher,
+        period: p.period
+      });
+    }
 
-      // Districts often bake the period into the section or course name.
-      var period = null;
-      var probe = (secName || '') + ' ' + name;
-      var m = probe.match(/\b(?:per(?:iod)?\.?\s*|p\s*)(\d{1,2})\b/i) ||
-              probe.match(/-\s*0?(\d{1,2})\s*$/);
-      if (m) { period = m[1]; }
+    rows.sort(function (a, b) {
+      if (a.period == null && b.period == null) { return 0; }
+      if (a.period == null) { return 1; }
+      if (b.period == null) { return -1; }
+      return a.period - b.period;
+    });
 
+    list.innerHTML = '<div class="lbl">Your classes</div>';
+    rows.forEach(function (r) {
       var card = document.createElement('div');
       card.className = 'card';
-      card.innerHTML = '<div class="cname">' + esc(name) + '</div><dl class="meta">' +
-        '<dt>Teacher</dt><dd class="teach">' + (teachers ? esc(teachers) : 'not published yet') + '</dd>' +
-        (period ? '<dt>Period</dt><dd>' + esc(period) + '</dd>' : '') +
-        '<dt>Section</dt><dd>' + (secName ? esc(secName) : '#' + e.course_section_id) + '</dd>' +
-        '<dt>State</dt><dd>' + esc(e.enrollment_state) + '</dd>' +
+      card.innerHTML =
+        '<div class="chead">' +
+        '<span class="per">' + (r.period != null ? ('P' + r.period) : '\u2014') + '</span>' +
+        '<span class="cname">' + esc(r.title) + '</span></div>' +
+        '<dl class="meta">' +
+        '<dt>Teacher</dt><dd class="teach">' + (r.teacher ? esc(r.teacher) : 'unknown') + '</dd>' +
+        '<dt>Section</dt><dd>' + (r.raw ? esc(r.raw) : '#' + r.enr.course_section_id) + '</dd>' +
+        '<dt>State</dt><dd>' + esc(r.enr.enrollment_state) + '</dd>' +
         '</dl>';
       list.appendChild(card);
-    }
+    });
   }
 
   run();
