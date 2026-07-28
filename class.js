@@ -61,28 +61,19 @@
   @keyframes p{0%,100%{opacity:.25}50%{opacity:1}}
   @media (prefers-reduced-motion:reduce){.dot{animation:none;opacity:.7}}
 
-  .card{border:1px solid #272d3a;border-radius:10px;padding:16px;margin-top:12px;background:#191d27}
-  .chead{display:flex;align-items:baseline;gap:12px}
+  .card{border:1px solid #272d3a;border-radius:10px;padding:15px 16px;margin-top:10px;background:#191d27}
+  .chead{display:flex;align-items:baseline;gap:13px}
   .per{
     font:700 15px/1 ui-monospace,"SF Mono","Roboto Mono",Menlo,monospace;
     color:#e2a13f;flex:none;min-width:3ch
   }
   .cname{font-size:16px;font-weight:600;line-height:1.3}
-  .meta{margin-top:10px;display:grid;grid-template-columns:auto 1fr;gap:5px 14px;
-    font:400 13px/1.4 ui-monospace,"SF Mono","Roboto Mono",Menlo,monospace}
-  .meta dt{color:#5f6879}
-  .meta dd{color:#c3cad8;word-break:break-word}
-  .teach{color:#57c9a5}
+  .teach{margin:7px 0 0 calc(3ch + 13px);color:#57c9a5;
+    font:400 13px/1.3 ui-monospace,"SF Mono","Roboto Mono",Menlo,monospace}
 
+  .cap{margin-top:12px;color:#5f6879;font-size:13px}
   .foot{margin-top:32px;color:#5f6879;
     font:400 12px/1.6 ui-monospace,"SF Mono","Roboto Mono",Menlo,monospace}
-  .k{color:#5f6879;width:11ch;flex:none}
-  .v{color:#e8eaf0;flex:1;word-break:break-word}
-  .v.bad{color:#e06b5a}
-  .v.teach{color:#57c9a5}
-  .raw{margin-top:14px;padding:12px;background:#0e1118;border:1px solid #272d3a;
-    border-radius:8px;color:#767e91;overflow-x:auto;white-space:pre;
-    font:400 11px/1.5 ui-monospace,"SF Mono","Roboto Mono",Menlo,monospace}
   section{margin-top:36px}
   `;
 
@@ -147,6 +138,10 @@
       out.title = parts.slice(0, -1).join(' - ');
     }
     if (!out.title) { out.title = raw; }
+    // Drop the district course code chunk, e.g. "Y4000XX", "S2210XX".
+    out.title = out.title.split(/\s+-\s+/).filter(function (s) {
+      return !/^[A-Z]{1,2}\d{3,}[A-Z]*$/.test(s.trim());
+    }).join(' - ') || out.title;
     return out;
   }
 
@@ -155,6 +150,14 @@
     var ap = h >= 12 ? 'PM' : 'AM';
     h = h % 12; if (h === 0) { h = 12; }
     return h + ':' + (m < 10 ? '0' : '') + m + ' ' + ap;
+  }
+
+  function cardHTML(r) {
+    return '<div class="card"><div class="chead">' +
+      '<span class="per">' + (r.period != null ? ('P' + r.period) : '\u2014') + '</span>' +
+      '<span class="cname">' + esc(r.title || 'Untitled') + '</span></div>' +
+      '<div class="teach">' + (r.teacher ? esc(r.teacher) : 'teacher unknown') + '</div>' +
+      '</div>';
   }
 
   async function getJSON(url) {
@@ -271,34 +274,26 @@
 
     body.innerHTML = html + '<section id="stw-list"></section>' +
       '<section id="stw-probe"></section>' +
-      '<p class="foot">Last checked ' + fmtTime(now) + ' \u00b7 rechecks every 10 min \u00b7 ' +
-      enr.length + ' total enrollment rows on this account</p>';
+      '<p class="foot">Last checked ' + fmtTime(now) + ' \u00b7 rechecks every 10 min</p>';
 
-    // Probe: run the newest enrollment on the account through the exact same
-    // code path the real classes use, so the parser is verifiable while the
-    // new year is still empty.
+    // Preview: newest enrollment on the account, rendered exactly the way a
+    // real class will be, so the layout and parser are both visible early.
     var probe = root.getElementById('stw-probe');
     var newest = enr.slice().sort(function (a, b) { return b.id - a.id; })[0];
     if (newest) {
-      probe.innerHTML = '<div class="lbl">Parser probe</div>';
-      var pSec = null, pErr = null;
+      var pSec = null;
       try {
         pSec = await getJSON('/api/v1/sections/' + newest.course_section_id);
-      } catch (x) { pErr = x.message; }
+      } catch (x) { /* ignore */ }
       var pp = parseSection(pSec && pSec.name);
-      var kv = function (k, v, cls) {
-        return '<div class="row"><span class="k">' + k + '</span><span class="v ' +
-          (cls || '') + '">' + esc(v == null ? '\u2014' : v) + '</span></div>';
-      };
-      probe.innerHTML += kv('enrollment', newest.id) +
-        kv('created', new Date(newest.created_at).toLocaleString()) +
-        kv('course', newest.course_id) +
-        kv('section', newest.course_section_id) +
-        kv('raw name', pErr ? ('fetch failed: ' + pErr) : (pSec && pSec.name), pErr ? 'bad' : '') +
-        kv('\u2192 title', pp.title === (pSec && pSec.name) ? null : pp.title) +
-        kv('\u2192 teacher', pp.teacher, 'teach') +
-        kv('\u2192 period', pp.period) +
-        '<pre class="raw">' + esc(JSON.stringify(pSec, null, 2)) + '</pre>';
+      probe.innerHTML = '<div class="lbl">Preview</div>' +
+        cardHTML({
+          title: pp.title,
+          teacher: pp.teacher,
+          period: pp.period,
+          raw: pSec && pSec.name
+        }) +
+        '<p class="cap">Your most recent class, drawn the way senior year will be.</p>';
     }
 
     if (current.length === 0) { return; }
@@ -336,21 +331,8 @@
       return a.period - b.period;
     });
 
-    list.innerHTML = '<div class="lbl">Your classes</div>';
-    rows.forEach(function (r) {
-      var card = document.createElement('div');
-      card.className = 'card';
-      card.innerHTML =
-        '<div class="chead">' +
-        '<span class="per">' + (r.period != null ? ('P' + r.period) : '\u2014') + '</span>' +
-        '<span class="cname">' + esc(r.title) + '</span></div>' +
-        '<dl class="meta">' +
-        '<dt>Teacher</dt><dd class="teach">' + (r.teacher ? esc(r.teacher) : 'unknown') + '</dd>' +
-        '<dt>Section</dt><dd>' + (r.raw ? esc(r.raw) : '#' + r.enr.course_section_id) + '</dd>' +
-        '<dt>State</dt><dd>' + esc(r.enr.enrollment_state) + '</dd>' +
-        '</dl>';
-      list.appendChild(card);
-    });
+    list.innerHTML = '<div class="lbl">Your classes</div>' +
+      rows.map(cardHTML).join('');
   }
 
   run();
